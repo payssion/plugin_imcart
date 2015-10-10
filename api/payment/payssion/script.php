@@ -6,14 +6,15 @@
  */
 
 /**
- * Description of BrandJoinLanguageLogic
+ * Description of payssion
  *
- * @author xmb <QQ: www.35zh.com>
  */
-class payssion extends BasePaymentInterface {  //修改类名为testpay，和接口名称一致
+class payssion extends BasePaymentInterface {
 
     public $orderNo;
-    public $_setting = array(//$_setting保存默认的参数值，如果需要可自行添加
+    public $_setting = array(
+    	'return_url' => 'pay_result_payssion_client.html',
+    	'notify_url' => 'pay_result_payssion_server.html',
         'pay_url' => 'https://www.payssion.com/payment/create.html'/* 支付页面路径 */
     );
 
@@ -34,7 +35,7 @@ class payssion extends BasePaymentInterface {  //修改类名为testpay，和接
         //订单具体参数值，存入数组$info,然后通过方法get_frominfo()返回html表单
         $info = array();
         $info['api_key'] = $this->cfg["py_apikey"];    //后台设置参数值
-        $secret_key = $this->cfg["py_sceretkey"];   //后台设置参数值
+        $secret_key = $this->cfg["py_secretkey"];   //后台设置参数值
         $info['track_id'] = $order['itemno'];    //订单号
         $info['description'] = $_SERVER['SERVER_NAME'] . '#' . $info['track_id'];
         $info['currency'] = strtoupper($order['currency_code']);   //订单货币
@@ -42,10 +43,11 @@ class payssion extends BasePaymentInterface {  //修改类名为testpay，和接
         $info['amount'] = sprintf("%.2f", $ordertotal); //订单金额保留小数点后两位
         $info['success_url'] = "http://" . $_SERVER['SERVER_NAME'] . FOLDER_ROOT . $this->_setting['return_url']; //支付后必须跳转到这个url
         $info['fail_url'] = $info['success_url'];
+        $info['notify_url'] = "http://" . $_SERVER['SERVER_NAME'] . FOLDER_ROOT . $this->_setting['notify_url'];
         $info['payer_name'] = $orderaddress['first_name'] . ' ' . $orderaddress['last_name'];
         $info['payer_email'] = $orderaddress['email'];
         
-        $info['api_sig'] = $this->generateSignature($info, $this->cfg["py_sceretkey"]);
+        $info['api_sig'] = $this->generateSignature($info, $this->cfg["py_secretkey"]);
         
         $info['pay_url'] = $this->_setting['pay_url']; //支付页面url
         $html = $this->get_frominfo($info);
@@ -64,52 +66,76 @@ class payssion extends BasePaymentInterface {  //修改类名为testpay，和接
      * 初始化POST ORDER, ORDER_PAYMENT
      */
     public function initPost() {
-        //获取pay_url提交过来的参数
-        $info = array();
-        if ($_REQUEST['tradeNo']) {
-            $info["merNo"] = $_REQUEST["merNo"];
-            $info["gatewayNo"] = $_REQUEST["gatewayNo"];
-            $info["tradeNo"] = $_REQUEST["tradeNo"];
-            $info["orderNo"] = $_REQUEST["orderNo"];
-            $info["orderCurrency"] = $_POST['orderCurrency'];
-            $info["cardNo"] = $_POST['cardNo'];
-            $info["orderAmount"] = $_REQUEST["orderAmount"];
-            $info["orderStatus"] = $_REQUEST["orderStatus"];
-            $info["orderInfo"] = $_REQUEST["orderInfo"];
-            $info["signInfo"] = $_REQUEST["signInfo"];
+    	$orderpayment = null;
+        if ($_POST['state'] == 'complete') {
+        	$item_number = $_POST['track_id'];
+        	$orderLogic = $this->load("order");
+        	$orderPaymentLogic = $this->load("orderPayment");
+        	$order = $orderLogic->getOne(' itemno="' . $item_number . '"');  //获取订单信息
+        	if ($order) {
+        		$orderpayment = $orderPaymentLogic->getOne('order_id=' . $order['id']); //支付金额信息
+        		$this->loadConfig($orderpayment['payment_id']);     //获取后台配置信息
+        		if ($orderpayment) {
+        			if ($this->isValidNotify()) {
+        				if($orderpayment['status'] != 1) {
+        					$payment_data = array(
+        							'pay_method_no' => $_POST['transaction_id'],
+        							'status'        => 1,
+        							'end_time' => SYS_TIME,
+        							'payer'    => ''
+        					);
+        					$res = $orderPaymentLogic->save($payment_data, $orderpayment['id']);
+        					if ($res) {
+        						$orderpayment['pay_method_no'] = $_POST['transaction_id'];  //支付接口回调的支付水流号
+        						$orderpayment['end_time'] = SYS_TIME;
+        						$orderpayment['status'] = 1;
+        						$orderpayment['payer'] = '';
+        					}
+        				} else {
+        					$orderpayment['completed'] = 1;
+        				}
+        			} else {
+        				Common::log('payssion: failed to check signature');
+        			}
+        			
+        		} else {
+        			Common::log('no_order_payment');
+        		}
+        	} else {
+        		//订单号 错误
+        		Common::log('order number error'.$item_number."||".json_encode($_POST));
+        	}
         }
-        //获取pay_url提交过来的参数 end
-        $orderLogic = $this->load("order");
-        $orderPaymentLogic = $this->load("orderPayment");
-        $order = $orderLogic->getOne(' itemno="' . Common::strEscape($info['orderNo']) . '"');  //获取订单信息
-        $orderpayment = $orderPaymentLogic->getOne('order_id=' . $order['id']); //支付金额信息
-        $this->loadConfig($orderpayment['payment_id']);     //获取后台配置信息
-        if ($_REQUEST['orderNo']) {      //这边无论成功或失败都要返回订单号$this->orderNo
-            $this->orderNo = $_REQUEST['orderNo'];
-        } else {
-            $this->orderNo = $_REQUEST['orderID'];
-            return false;
-        }
-        //对订单状态进行处理，结果信息保存到$orderpayment
-        if (!empty($info)) {
-            $MD5key = $this->cfg["exp_md5key"];
-            $signInfocheck = hash("sha256", $info["merNo"] . $info["gatewayNo"] . $info["tradeNo"] . $info["orderNo"] . $info["orderCurrency"] . $info["orderAmount"] . $info["orderStatus"] . $info["orderInfo"] . $MD5key);
-            if (strtolower($info["signInfo"]) == strtolower($signInfocheck)) {  //验证支付参数，防串改
-                if ($_REQUEST['orderStatus'] == 1) {
-                    $param['status'] = 1;
-                } else {
-                    $param['status'] = 0;
-                }
-                $param['tradeNo'] = $info["tradeNo"];
-                $rel = $this->handlOrderPayment($param, $orderpayment); //对支付状态进行处理
-                return $rel;
-            } else {
-                Common::log('Hash info not the same');
-            }
-        } else {
-            Common::log('No return parameter');
-        }
-        //对订单状态进行处理，结果信息保存到$orderpayment end
+        
+        return $orderpayment;
+    }
+    
+    public function isValidNotify() {
+    	$apiKey = $this->cfg["py_apikey"];;
+    	$secretKey = $this->cfg["py_secretkey"];
+    
+    	// Assign payment notification values to local variables
+    	$pm_id = $_POST['pm_id'];
+    	$amount = $_POST['amount'];
+    	$currency = $_POST['currency'];
+    	$track_id = $_POST['track_id'];
+    	$sub_track_id = $_POST['sub_track_id'];
+    	$state = $_POST['state'];
+    
+    	$check_array = array(
+    			$apiKey,
+    			$pm_id,
+    			$amount,
+    			$currency,
+    			$track_id,
+    			$sub_track_id,
+    			$state,
+    			$secretKey
+    	);
+    	$check_msg = implode('|', $check_array);
+    	$check_sig = md5($check_msg);
+    	$notify_sig = $_POST['notify_sig'];
+    	return ($notify_sig == $check_sig);
     }
 
     public function responseResult() { //这个方法order.php会调用到，不能删除
@@ -130,40 +156,6 @@ class payssion extends BasePaymentInterface {  //修改类名为testpay，和接
         }
         $html.='</form>' . "\r\n";
         return $html;
-    }
-
-    /**
-     * 处理订单支付信息
-     * $params['status'] 1成功，0，失败【必填】
-     * $params['tradeNo'] 回调的支付流水号
-     * $orderpayment  array 订单支付信息【必填】
-     * @return array
-     */
-    private function handlOrderPayment($params, $orderpayment) {
-        if ($params['orderStatus'] == 1) {    //支付成功
-            if ($orderpayment['pay_method_no'] == $params["tradeNo"] && $orderpayment['status'] == 1) {   //已经付款过了
-                $orderpayment['completed'] = 1;
-            } else {  
-                $payment_data = array(
-                    'pay_method_no' => $params['tradeNo'],
-                    'status' => 1,
-                    'end_time' => SYS_TIME,
-                    'payer' => '',
-                );
-                $orderPaymentLogic = $this->load("orderPayment");
-                $res = $orderPaymentLogic->save($payment_data, $orderpayment['id']); //更新订单状态
-                if ($res) {
-                    $orderpayment['pay_method_no'] = $params['tradeNo'];  //支付接口回调的支付水流号
-                    $orderpayment['end_time'] = SYS_TIME;
-                    $orderpayment['status'] = 1;
-                    $orderpayment['payer'] = '';
-                }
-            }
-            return $orderpayment; 
-        } else if ($params['orderStatus'] == 0) {//支付失败
-            Common::log('Failed to pay for orders');
-            return array();
-        }
     }
 
 }
